@@ -3,7 +3,7 @@ services:
     name: flash-bingo-api
     env: node
     plan: free
-    buildCommand: pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build
+    buildCommand: pnpm install --frozen-lockfile --prod=false && pnpm --filter @workspace/api-server run build
     startCommand: pnpm --filter @workspace/api-server run start
     envVars:
       - key: TELEGRAM_BOT_TOKEN
@@ -21,7 +21,7 @@ services:
     name: flash-bingo-mini-app
     env: node
     plan: free
-    buildCommand: pnpm install --frozen-lockfile && pnpm --filter @workspace/flash-bingo-mini-app run build
+    buildCommand: pnpm install --frozen-lockfile --prod=false && pnpm --filter @workspace/flash-bingo-mini-app run build
     startCommand: pnpm --filter @workspace/flash-bingo-mini-app run serve
     envVars:
       - key: VITE_API_BASE_URL
