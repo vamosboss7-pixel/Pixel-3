@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request } from "express";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 const TELEGRAM_API_BASE = "https://api.telegram.org/bot";
@@ -31,11 +32,12 @@ type TelegramAuthPayload = {
 };
 
 function getBotToken() {
-  return process.env["TELEGRAM_BOT_TOKEN"];
+  const value = process.env["TELEGRAM_BOT_TOKEN"]?.trim();
+  return value || undefined;
 }
 
 function getWebAppUrl() {
-  const value = process.env["TELEGRAM_WEB_APP_URL"];
+  const value = process.env["TELEGRAM_WEB_APP_URL"]?.trim();
   if (!value) return undefined;
   return value.startsWith("http://") || value.startsWith("https://")
     ? value
@@ -43,7 +45,7 @@ function getWebAppUrl() {
 }
 
 function getWebhookUrl() {
-  const baseUrl = process.env["TELEGRAM_WEBHOOK_URL"] ?? process.env["RENDER_EXTERNAL_URL"];
+  const baseUrl = (process.env["TELEGRAM_WEBHOOK_URL"] ?? process.env["RENDER_EXTERNAL_URL"])?.trim();
   if (!baseUrl) return undefined;
   const normalizedBaseUrl = baseUrl.startsWith("http://") || baseUrl.startsWith("https://")
     ? baseUrl
@@ -131,7 +133,7 @@ router.post("/telegram/webhook", async (req, res) => {
     await handleTelegramUpdate(req.body as TelegramUpdate);
     res.sendStatus(200);
   } catch (error) {
-    req.log?.error({ error }, "Telegram update handling failed");
+    req.log?.error({ err: error }, "Telegram update handling failed");
     res.sendStatus(200);
   }
 });
@@ -156,21 +158,48 @@ export async function registerTelegramWebhook() {
   const token = getBotToken();
   const webhookUrl = getWebhookUrl();
   const webAppUrl = getWebAppUrl();
-  if (!token || !webhookUrl || !webAppUrl) return;
+  if (!token || !webhookUrl || !webAppUrl) {
+    logger.warn(
+      {
+        hasBotToken: Boolean(token),
+        hasWebhookUrl: Boolean(webhookUrl),
+        hasWebAppUrl: Boolean(webAppUrl),
+      },
+      "Telegram webhook registration skipped because configuration is incomplete",
+    );
+    return;
+  }
 
-  const secretToken = process.env["TELEGRAM_WEBHOOK_SECRET"];
+  const secretToken = process.env["TELEGRAM_WEBHOOK_SECRET"]?.trim();
   await telegramRequest("setWebhook", {
     url: webhookUrl,
     ...(secretToken ? { secret_token: secretToken } : {}),
     allowed_updates: ["message", "callback_query"],
     drop_pending_updates: false,
   });
-  await telegramRequest("setChatMenuButton", {
-    menu_button: { type: "web_app", text: "Flash Bingo", web_app: { url: webAppUrl } },
-  });
-  await telegramRequest("setMyCommands", {
-    commands: [{ command: "start", description: "Flash Bingo ክፈት" }],
-  });
+
+  const optionalSetup = [
+    {
+      method: "setChatMenuButton",
+      body: {
+        menu_button: { type: "web_app", text: "Flash Bingo", web_app: { url: webAppUrl } },
+      },
+    },
+    {
+      method: "setMyCommands",
+      body: { commands: [{ command: "start", description: "Flash Bingo ክፈት" }] },
+    },
+  ] as const;
+
+  for (const setup of optionalSetup) {
+    try {
+      await telegramRequest(setup.method, setup.body);
+    } catch (error) {
+      logger.warn({ err: error, method: setup.method }, "Optional Telegram bot setup failed");
+    }
+  }
+
+  logger.info("Telegram webhook registered");
 }
 
 export default router;

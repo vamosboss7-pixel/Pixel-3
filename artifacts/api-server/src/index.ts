@@ -24,6 +24,6 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
   void registerTelegramWebhook().catch((error: unknown) => {
-    logger.error({ error }, "Telegram webhook registration failed");
+    logger.error({ err: error }, "Telegram webhook registration failed");
   });
 });

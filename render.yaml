@@ -18,8 +18,8 @@ services:
     healthCheckPath: /api/healthz
 
   - type: web
+    runtime: static
     name: flash-bingo-mini-app
-    env: static
     buildCommand: pnpm install --frozen-lockfile --prod=false && pnpm --filter @workspace/flash-bingo-mini-app run build
     staticPublishPath: artifacts/flash-bingo-mini-app/dist/public
     routes:
