@@ -51,8 +51,9 @@ async function getFilePath(requestUrl) {
 }
 
 const server = createServer(async (request, response) => {
-  if (request.method === 'GET' && request.url?.split('?')[0] === '/healthz') {
-    send(response, 200, 'ok', 'text/plain; charset=utf-8');
+  if ((request.method === 'GET' || request.method === 'HEAD') && request.url?.split('?')[0] === '/healthz') {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(request.method === 'GET' ? 'ok' : undefined);
     return;
   }
 
