@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request } from "express";
 import { logger } from "../lib/logger";
 
@@ -44,6 +44,13 @@ function getWebAppUrl() {
     : `https://${value}`;
 }
 
+function getWebhookSecret() {
+  const value = process.env["TELEGRAM_WEBHOOK_SECRET"]?.trim();
+  if (!value) return undefined;
+  if (/^[A-Za-z0-9_-]{1,256}$/.test(value)) return value;
+  return createHash("sha256").update(value).digest("hex");
+}
+
 function getWebhookUrl() {
   const baseUrl = (process.env["TELEGRAM_WEBHOOK_URL"] ?? process.env["RENDER_EXTERNAL_URL"])?.trim();
   if (!baseUrl) return undefined;
@@ -70,7 +77,7 @@ async function telegramRequest<T>(method: string, body: Record<string, unknown>)
 }
 
 function isTelegramWebhookRequest(req: Request) {
-  const expectedSecret = process.env["TELEGRAM_WEBHOOK_SECRET"];
+  const expectedSecret = getWebhookSecret();
   return Boolean(expectedSecret) && req.header("x-telegram-bot-api-secret-token") === expectedSecret;
 }
 
@@ -170,7 +177,7 @@ export async function registerTelegramWebhook() {
     return;
   }
 
-  const secretToken = process.env["TELEGRAM_WEBHOOK_SECRET"]?.trim();
+  const secretToken = getWebhookSecret();
   await telegramRequest("setWebhook", {
     url: webhookUrl,
     ...(secretToken ? { secret_token: secretToken } : {}),
