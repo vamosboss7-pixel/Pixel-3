@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: flash-bingo-api
+    env: node
+    plan: free
+    buildCommand: pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build
+    startCommand: pnpm --filter @workspace/api-server run start
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        generateValue: true
+      - key: TELEGRAM_WEB_APP_URL
+        fromService:
+          type: web
+          name: flash-bingo-mini-app
+          property: host
+    healthCheckPath: /api/healthz
+
+  - type: web
+    name: flash-bingo-mini-app
+    env: node
+    plan: free
+    buildCommand: pnpm install --frozen-lockfile && pnpm --filter @workspace/flash-bingo-mini-app run build
+    startCommand: pnpm --filter @workspace/flash-bingo-mini-app run serve
+    envVars:
+      - key: VITE_API_BASE_URL
+        fromService:
+          type: web
+          name: flash-bingo-api
+          property: host
+    healthCheckPath: /
