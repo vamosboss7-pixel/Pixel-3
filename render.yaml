@@ -17,12 +17,14 @@ services:
           property: host
     healthCheckPath: /api/healthz
 
-  - type: web
+  - type: static
     name: flash-bingo-mini-app
-    env: node
-    plan: free
     buildCommand: pnpm install --frozen-lockfile --prod=false && pnpm --filter @workspace/flash-bingo-mini-app run build
-    startCommand: pnpm --filter @workspace/flash-bingo-mini-app run serve
+    staticPublishPath: artifacts/flash-bingo-mini-app/dist/public
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
     envVars:
       - key: VITE_API_BASE_URL
         fromService:
