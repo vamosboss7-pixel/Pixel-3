@@ -34,7 +34,8 @@ declare global {
         close?: () => void;
         colorScheme?: 'light' | 'dark';
         themeParams?: { bg_color?: string; secondary_bg_color?: string; text_color?: string; button_color?: string };
-        initDataUnsafe?: { user?: { first_name?: string; last_name?: string; username?: string; photo_url?: string } };
+        initData?: string;
+        initDataUnsafe?: { user?: { id?: number; first_name?: string; last_name?: string; username?: string; photo_url?: string } };
       };
     };
   }
@@ -94,18 +95,33 @@ function useTelegramBridge() {
   const [isTelegram, setIsTelegram] = useState(false);
   useEffect(() => {
     const webApp = window.Telegram?.WebApp;
-    if (webApp) {
-      webApp.ready?.();
-      webApp.expand?.();
-      setIsTelegram(true);
-      const user = webApp.initDataUnsafe?.user;
-      if (user?.first_name) setUserName([user.first_name, user.last_name].filter(Boolean).join(' '));
-      const theme = webApp.themeParams;
-      if (theme?.bg_color) document.documentElement.style.setProperty('--telegram-bg', theme.bg_color);
-      if (theme?.secondary_bg_color) document.documentElement.style.setProperty('--telegram-secondary-bg', theme.secondary_bg_color);
-      if (theme?.button_color) document.documentElement.style.setProperty('--telegram-button', theme.button_color);
-      if (theme?.text_color) document.documentElement.style.setProperty('--telegram-text', theme.text_color);
-    }
+    if (!webApp) return;
+
+    webApp.ready?.();
+    webApp.expand?.();
+    setIsTelegram(true);
+    const user = webApp.initDataUnsafe?.user;
+    if (user?.first_name) setUserName([user.first_name, user.last_name].filter(Boolean).join(' '));
+    const theme = webApp.themeParams;
+    if (theme?.bg_color) document.documentElement.style.setProperty('--telegram-bg', theme.bg_color);
+    if (theme?.secondary_bg_color) document.documentElement.style.setProperty('--telegram-secondary-bg', theme.secondary_bg_color);
+    if (theme?.button_color) document.documentElement.style.setProperty('--telegram-button', theme.button_color);
+    if (theme?.text_color) document.documentElement.style.setProperty('--telegram-text', theme.text_color);
+
+    if (!webApp.initData) return;
+    const configuredApiUrl = import.meta.env.VITE_API_BASE_URL;
+    const apiUrl = configuredApiUrl
+      ? (configuredApiUrl.startsWith('http') ? configuredApiUrl : `https://${configuredApiUrl}`)
+      : '';
+    void fetch(`${apiUrl}/api/telegram/auth`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ initData: webApp.initData }),
+    }).then(async (response) => {
+      if (!response.ok) return;
+      const data = await response.json() as { user?: { first_name?: string; last_name?: string } };
+      if (data.user?.first_name) setUserName([data.user.first_name, data.user.last_name].filter(Boolean).join(' '));
+    }).catch(() => undefined);
   }, []);
   return { userName, isTelegram };
 }

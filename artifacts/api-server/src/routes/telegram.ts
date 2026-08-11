@@ -1,0 +1,344 @@
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { db, telegramUsers } from "@workspace/db";
+import { Router, type IRouter, type Request } from "express";
+import { logger } from "../lib/logger";
+
+const router: IRouter = Router();
+const TELEGRAM_API_BASE = "https://api.telegram.org/bot";
+const AUTH_DATA_MAX_AGE_SECONDS = 86_400;
+
+type TelegramUser = {
+  id: number;
+  first_name: string;
+  last_name?: string;
+  username?: string;
+  language_code?: string;
+};
+
+type TelegramUpdate = {
+  message?: {
+    chat: { id: number };
+    text?: string;
+    from?: TelegramUser;
+    contact?: {
+      phone_number: string;
+      user_id?: number;
+      first_name: string;
+      last_name?: string;
+    };
+  };
+  callback_query?: {
+    id: string;
+    data?: string;
+    message?: { chat: { id: number } };
+  };
+};
+
+type TelegramAuthPayload = {
+  initData?: unknown;
+};
+
+function getBotToken() {
+  const value = process.env["TELEGRAM_BOT_TOKEN"]?.trim();
+  return value || undefined;
+}
+
+function getWebAppUrl() {
+  const value = process.env["TELEGRAM_WEB_APP_URL"]?.trim();
+  if (!value) return undefined;
+  return value.startsWith("http://") || value.startsWith("https://")
+    ? value
+    : `https://${value}`;
+}
+
+function getWebhookSecret() {
+  const value = process.env["TELEGRAM_WEBHOOK_SECRET"]?.trim();
+  if (!value) return undefined;
+  if (/^[A-Za-z0-9_-]{1,256}$/.test(value)) return value;
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function getWebhookUrl() {
+  const baseUrl = (process.env["TELEGRAM_WEBHOOK_URL"] ?? process.env["RENDER_EXTERNAL_URL"])?.trim();
+  if (!baseUrl) return undefined;
+  const normalizedBaseUrl = baseUrl.startsWith("http://") || baseUrl.startsWith("https://")
+    ? baseUrl
+    : `https://${baseUrl}`;
+  return new URL("/api/telegram/webhook", normalizedBaseUrl).toString();
+}
+
+async function telegramRequest<T>(method: string, body: Record<string, unknown>): Promise<T> {
+  const token = getBotToken();
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN is not configured");
+
+  const response = await fetch(`${TELEGRAM_API_BASE}${token}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const result = (await response.json()) as { ok: boolean; result?: T; description?: string };
+  if (!response.ok || !result.ok) {
+    throw new Error(`Telegram ${method} failed: ${result.description ?? response.statusText}`);
+  }
+  return result.result as T;
+}
+
+function isTelegramWebhookRequest(req: Request) {
+  const expectedSecret = getWebhookSecret();
+  return Boolean(expectedSecret) && req.header("x-telegram-bot-api-secret-token") === expectedSecret;
+}
+
+function isValidTelegramInitData(initData: string, botToken: string) {
+  const params = new URLSearchParams(initData);
+  const receivedHash = params.get("hash");
+  const authDate = Number(params.get("auth_date"));
+  if (!receivedHash || !Number.isSafeInteger(authDate)) return false;
+  if (Math.abs(Date.now() / 1000 - authDate) > AUTH_DATA_MAX_AGE_SECONDS) return false;
+
+  params.delete("hash");
+  const dataCheckString = [...params.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+  const secretKey = createHmac("sha256", "WebAppData").update(botToken).digest();
+  const calculatedHash = createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
+  const receivedHashBuffer = Buffer.from(receivedHash, "hex");
+  const calculatedHashBuffer = Buffer.from(calculatedHash, "hex");
+  return receivedHashBuffer.length === calculatedHashBuffer.length && timingSafeEqual(receivedHashBuffer, calculatedHashBuffer);
+}
+
+function parseTelegramUser(initData: string) {
+  const userValue = new URLSearchParams(initData).get("user");
+  if (!userValue) return undefined;
+  try {
+    return JSON.parse(userValue) as TelegramUser;
+  } catch {
+    return undefined;
+  }
+}
+
+function getMainKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "🎮 ቢንጎ ጀምር" }, { text: "🎁 ሽልማት እይ" }],
+      [{ text: "💰 ገንዘብ ለመጫን" }, { text: "💸 ወጪ ለመጠየቅ" }],
+      [{ text: "🔗 ግብዣ & እርዳታ" }, { text: "👤 መመዝገብ", request_contact: true }],
+      [{ text: "🆘 እርዳታ" }, { text: "🌐 ቋንቋ / Language" }],
+      [{ text: "📢 አዳዲስ ሽልማቶች" }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+function getContactKeyboard() {
+  return {
+    keyboard: [[{ text: "📱 ኮንታክት ላክ", request_contact: true }]],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+}
+
+async function sendWelcomeMessage(chatId: number, firstName?: string) {
+  await telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: `🎉 እንኳን ወደ Flash Bingo በደህና መጡ${firstName ? ` ${firstName}` : ""}! 🎰\n\nእባክዎ ለመመዝገብ "👤 መመዝገብ" የሚለውን ይጫኑ።\n\nከታች ያለውን ምናሌ በመጠቀም ጨዋታውን ይጀምሩ።`,
+    reply_markup: getMainKeyboard(),
+  });
+}
+
+async function sendContactPrompt(chatId: number) {
+  await telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: "ምዝገባን ለመጨረስ ከታች ያለውን ቁልፍ በመጫን የራስዎን Telegram contact ያጋሩ።",
+    reply_markup: getContactKeyboard(),
+  });
+}
+
+async function sendMiniAppLink(chatId: number) {
+  const webAppUrl = getWebAppUrl();
+  if (!webAppUrl) {
+    await telegramRequest("sendMessage", {
+      chat_id: chatId,
+      text: "Mini App አሁን ዝግጁ አይደለም። እባክዎ ቆይተው እንደገና ይሞክሩ።",
+    });
+    return;
+  }
+  await telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: "Flash Bingo ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ።",
+    reply_markup: {
+      inline_keyboard: [[{ text: "Flash Bingo ክፈት", web_app: { url: webAppUrl } }]],
+    },
+  });
+}
+
+async function saveTelegramContact(message: NonNullable<TelegramUpdate["message"]>) {
+  const contact = message.contact;
+  const user = message.from;
+  if (!contact || !user || contact.user_id !== user.id) {
+    await telegramRequest("sendMessage", {
+      chat_id: message.chat.id,
+      text: "እባክዎ የራስዎን Telegram contact ብቻ ያጋሩ።",
+    });
+    return;
+  }
+
+  await db
+    .insert(telegramUsers)
+    .values({
+      telegramId: user.id,
+      chatId: message.chat.id,
+      firstName: contact.first_name || user.first_name,
+      lastName: contact.last_name ?? user.last_name ?? null,
+      username: user.username ?? null,
+      phoneNumber: contact.phone_number,
+      languageCode: user.language_code ?? null,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: telegramUsers.telegramId,
+      set: {
+        chatId: message.chat.id,
+        firstName: contact.first_name || user.first_name,
+        lastName: contact.last_name ?? user.last_name ?? null,
+        username: user.username ?? null,
+        phoneNumber: contact.phone_number,
+        languageCode: user.language_code ?? null,
+        updatedAt: new Date(),
+      },
+    });
+
+  await telegramRequest("sendMessage", {
+    chat_id: message.chat.id,
+    text: `✅ እንኳን ደስ አለዎት ${user.first_name}! ምዝገባዎ ተሳክቷል።\n\nአሁን Flash Bingoን መጫወት ይችላሉ።`,
+    reply_markup: getMainKeyboard(),
+  });
+}
+
+async function handleTelegramUpdate(update: TelegramUpdate) {
+  const message = update.message;
+  if (message?.contact) {
+    await saveTelegramContact(message);
+    return;
+  }
+
+  const text = message?.text;
+  if (!message || !text) return;
+  if (text.startsWith("/start")) {
+    await sendWelcomeMessage(message.chat.id, message.from?.first_name);
+  } else if (text === "🎮 ቢንጎ ጀምር" || text === "/play") {
+    await sendMiniAppLink(message.chat.id);
+  } else if (text === "👤 መመዝገብ" || text === "/register") {
+    await sendContactPrompt(message.chat.id);
+  } else if (text === "/menu") {
+    await sendWelcomeMessage(message.chat.id, message.from?.first_name);
+  } else if (text === "🆘 እርዳታ" || text === "/help") {
+    await telegramRequest("sendMessage", {
+      chat_id: message.chat.id,
+      text: "እገዛ ለማግኘት የምናሌ አማራጮቹን ይጠቀሙ። ምዝገባ ለመጨረስ 👤 መመዝገብን ይጫኑ።",
+      reply_markup: getMainKeyboard(),
+    });
+  } else if (text === "🎁 ሽልማት እይ" || text === "💰 ገንዘብ ለመጫን" || text === "💸 ወጪ ለመጠየቅ" || text === "🔗 ግብዣ & እርዳታ" || text === "🌐 ቋንቋ / Language" || text === "📢 አዳዲስ ሽልማቶች") {
+    await telegramRequest("sendMessage", {
+      chat_id: message.chat.id,
+      text: "ይህ አማራጭ በቅርቡ ይገኛል።",
+      reply_markup: getMainKeyboard(),
+    });
+  }
+
+  const callbackQuery = update.callback_query;
+  if (callbackQuery) {
+    await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id });
+  }
+}
+
+router.post("/telegram/webhook", async (req, res) => {
+  if (!isTelegramWebhookRequest(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  try {
+    await handleTelegramUpdate(req.body as TelegramUpdate);
+    res.sendStatus(200);
+  } catch (error) {
+    req.log?.error({ err: error }, "Telegram update handling failed");
+    res.sendStatus(200);
+  }
+});
+
+router.post("/telegram/auth", (req, res) => {
+  const botToken = getBotToken();
+  const { initData } = req.body as TelegramAuthPayload;
+  if (!botToken || typeof initData !== "string" || !isValidTelegramInitData(initData, botToken)) {
+    res.status(401).json({ error: "Invalid Telegram authentication data" });
+    return;
+  }
+
+  const user = parseTelegramUser(initData);
+  if (!user) {
+    res.status(401).json({ error: "Telegram user data is missing" });
+    return;
+  }
+  res.json({ user });
+});
+
+export async function registerTelegramWebhook() {
+  const token = getBotToken();
+  const webhookUrl = getWebhookUrl();
+  const webAppUrl = getWebAppUrl();
+  if (!token || !webhookUrl) {
+    logger.warn(
+      { hasBotToken: Boolean(token), hasWebhookUrl: Boolean(webhookUrl) },
+      "Telegram webhook registration skipped because required configuration is incomplete",
+    );
+    return;
+  }
+
+  if (!webAppUrl) {
+    logger.warn("Telegram Mini App URL is not configured; webhook will still be registered");
+  }
+
+  const secretToken = getWebhookSecret();
+  await telegramRequest("setWebhook", {
+    url: webhookUrl,
+    ...(secretToken ? { secret_token: secretToken } : {}),
+    allowed_updates: ["message", "callback_query"],
+    drop_pending_updates: false,
+  });
+
+  const optionalSetup = [
+    ...(webAppUrl
+      ? [{
+          method: "setChatMenuButton",
+          body: {
+            menu_button: { type: "web_app", text: "Flash Bingo", web_app: { url: webAppUrl } },
+          },
+        }]
+      : []),
+    {
+      method: "setMyCommands",
+      body: {
+        commands: [
+          { command: "start", description: "Flash Bingo ክፈት" },
+          { command: "register", description: "በcontact ተመዝገብ" },
+          { command: "play", description: "ጨዋታ ጀምር" },
+          { command: "help", description: "እገዛ አግኝ" },
+        ],
+      },
+    },
+  ] as const;
+
+  for (const setup of optionalSetup) {
+    try {
+      await telegramRequest(setup.method, setup.body);
+    } catch (error) {
+      logger.warn({ err: error, method: setup.method }, "Optional Telegram bot setup failed");
+    }
+  }
+
+  logger.info({ hasWebAppUrl: Boolean(webAppUrl) }, "Telegram webhook registered");
+}
+
+export default router;
