@@ -29,4 +29,3 @@ services:
           type: web
           name: flash-bingo-api
           property: host
-    healthCheckPath: /healthz
