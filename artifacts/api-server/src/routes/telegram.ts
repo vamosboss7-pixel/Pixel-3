@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { db, telegramUsers } from "@workspace/db";
 import { Router, type IRouter, type Request } from "express";
 import { logger } from "../lib/logger";
 
@@ -19,6 +20,12 @@ type TelegramUpdate = {
     chat: { id: number };
     text?: string;
     from?: TelegramUser;
+    contact?: {
+      phone_number: string;
+      user_id?: number;
+      first_name: string;
+      last_name?: string;
+    };
   };
   callback_query?: {
     id: string;
@@ -110,18 +117,133 @@ function parseTelegramUser(initData: string) {
   }
 }
 
-async function handleTelegramUpdate(update: TelegramUpdate) {
-  const message = update.message;
-  if (message?.text?.startsWith("/start")) {
-    const webAppUrl = getWebAppUrl();
+function getMainKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "🎮 ቢንጎ ጀምር" }, { text: "🎁 ሽልማት እይ" }],
+      [{ text: "💰 ገንዘብ ለመጫን" }, { text: "💸 ወጪ ለመጠየቅ" }],
+      [{ text: "🔗 ግብዣ & እርዳታ" }, { text: "👤 መመዝገብ", request_contact: true }],
+      [{ text: "🆘 እርዳታ" }, { text: "🌐 ቋንቋ / Language" }],
+      [{ text: "📢 አዳዲስ ሽልማቶች" }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+function getContactKeyboard() {
+  return {
+    keyboard: [[{ text: "📱 ኮንታክት ላክ", request_contact: true }]],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+}
+
+async function sendWelcomeMessage(chatId: number, firstName?: string) {
+  await telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: `🎉 እንኳን ወደ Flash Bingo በደህና መጡ${firstName ? ` ${firstName}` : ""}! 🎰\n\nእባክዎ ለመመዝገብ "👤 መመዝገብ" የሚለውን ይጫኑ።\n\nከታች ያለውን ምናሌ በመጠቀም ጨዋታውን ይጀምሩ።`,
+    reply_markup: getMainKeyboard(),
+  });
+}
+
+async function sendContactPrompt(chatId: number) {
+  await telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: "ምዝገባን ለመጨረስ ከታች ያለውን ቁልፍ በመጫን የራስዎን Telegram contact ያጋሩ።",
+    reply_markup: getContactKeyboard(),
+  });
+}
+
+async function sendMiniAppLink(chatId: number) {
+  const webAppUrl = getWebAppUrl();
+  if (!webAppUrl) {
+    await telegramRequest("sendMessage", {
+      chat_id: chatId,
+      text: "Mini App አሁን ዝግጁ አይደለም። እባክዎ ቆይተው እንደገና ይሞክሩ።",
+    });
+    return;
+  }
+  await telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: "Flash Bingo ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ።",
+    reply_markup: {
+      inline_keyboard: [[{ text: "Flash Bingo ክፈት", web_app: { url: webAppUrl } }]],
+    },
+  });
+}
+
+async function saveTelegramContact(message: NonNullable<TelegramUpdate["message"]>) {
+  const contact = message.contact;
+  const user = message.from;
+  if (!contact || !user || contact.user_id !== user.id) {
     await telegramRequest("sendMessage", {
       chat_id: message.chat.id,
-      text: webAppUrl
-        ? `ሰላም${message.from?.first_name ? ` ${message.from.first_name}` : ""}! ፈጣን ቢንጎን ለመጫወት ከታች ያለውን ቁልፍ ይጫኑ።`
-        : "ሰላም! Flash Bingo Bot ተገናኝቷል፣ ግን Mini App URL ገና አልተዘጋጀም።",
-      ...(webAppUrl
-        ? { reply_markup: { inline_keyboard: [[{ text: "Flash Bingo ክፈት", web_app: { url: webAppUrl } }]] } }
-        : {}),
+      text: "እባክዎ የራስዎን Telegram contact ብቻ ያጋሩ።",
+    });
+    return;
+  }
+
+  await db
+    .insert(telegramUsers)
+    .values({
+      telegramId: user.id,
+      chatId: message.chat.id,
+      firstName: contact.first_name || user.first_name,
+      lastName: contact.last_name ?? user.last_name ?? null,
+      username: user.username ?? null,
+      phoneNumber: contact.phone_number,
+      languageCode: user.language_code ?? null,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: telegramUsers.telegramId,
+      set: {
+        chatId: message.chat.id,
+        firstName: contact.first_name || user.first_name,
+        lastName: contact.last_name ?? user.last_name ?? null,
+        username: user.username ?? null,
+        phoneNumber: contact.phone_number,
+        languageCode: user.language_code ?? null,
+        updatedAt: new Date(),
+      },
+    });
+
+  await telegramRequest("sendMessage", {
+    chat_id: message.chat.id,
+    text: `✅ እንኳን ደስ አለዎት ${user.first_name}! ምዝገባዎ ተሳክቷል።\n\nአሁን Flash Bingoን መጫወት ይችላሉ።`,
+    reply_markup: getMainKeyboard(),
+  });
+}
+
+async function handleTelegramUpdate(update: TelegramUpdate) {
+  const message = update.message;
+  if (message?.contact) {
+    await saveTelegramContact(message);
+    return;
+  }
+
+  const text = message?.text;
+  if (!message || !text) return;
+  if (text.startsWith("/start")) {
+    await sendWelcomeMessage(message.chat.id, message.from?.first_name);
+  } else if (text === "🎮 ቢንጎ ጀምር" || text === "/play") {
+    await sendMiniAppLink(message.chat.id);
+  } else if (text === "👤 መመዝገብ" || text === "/register") {
+    await sendContactPrompt(message.chat.id);
+  } else if (text === "/menu") {
+    await sendWelcomeMessage(message.chat.id, message.from?.first_name);
+  } else if (text === "🆘 እርዳታ" || text === "/help") {
+    await telegramRequest("sendMessage", {
+      chat_id: message.chat.id,
+      text: "እገዛ ለማግኘት የምናሌ አማራጮቹን ይጠቀሙ። ምዝገባ ለመጨረስ 👤 መመዝገብን ይጫኑ።",
+      reply_markup: getMainKeyboard(),
+    });
+  } else if (text === "🎁 ሽልማት እይ" || text === "💰 ገንዘብ ለመጫን" || text === "💸 ወጪ ለመጠየቅ" || text === "🔗 ግብዣ & እርዳታ" || text === "🌐 ቋንቋ / Language" || text === "📢 አዳዲስ ሽልማቶች") {
+    await telegramRequest("sendMessage", {
+      chat_id: message.chat.id,
+      text: "ይህ አማራጭ በቅርቡ ይገኛል።",
+      reply_markup: getMainKeyboard(),
     });
   }
 
@@ -197,7 +319,14 @@ export async function registerTelegramWebhook() {
       : []),
     {
       method: "setMyCommands",
-      body: { commands: [{ command: "start", description: "Flash Bingo ክፈት" }] },
+      body: {
+        commands: [
+          { command: "start", description: "Flash Bingo ክፈት" },
+          { command: "register", description: "በcontact ተመዝገብ" },
+          { command: "play", description: "ጨዋታ ጀምር" },
+          { command: "help", description: "እገዛ አግኝ" },
+        ],
+      },
     },
   ] as const;
 
