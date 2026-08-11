@@ -114,13 +114,14 @@ async function handleTelegramUpdate(update: TelegramUpdate) {
   const message = update.message;
   if (message?.text?.startsWith("/start")) {
     const webAppUrl = getWebAppUrl();
-    if (!webAppUrl) return;
     await telegramRequest("sendMessage", {
       chat_id: message.chat.id,
-      text: `ሰላም${message.from?.first_name ? ` ${message.from.first_name}` : ""}! ፈጣን ቢንጎን ለመጫወት ከታች ያለውን ቁልፍ ይጫኑ።`,
-      reply_markup: {
-        inline_keyboard: [[{ text: "Flash Bingo ክፈት", web_app: { url: webAppUrl } }]],
-      },
+      text: webAppUrl
+        ? `ሰላም${message.from?.first_name ? ` ${message.from.first_name}` : ""}! ፈጣን ቢንጎን ለመጫወት ከታች ያለውን ቁልፍ ይጫኑ።`
+        : "ሰላም! Flash Bingo Bot ተገናኝቷል፣ ግን Mini App URL ገና አልተዘጋጀም።",
+      ...(webAppUrl
+        ? { reply_markup: { inline_keyboard: [[{ text: "Flash Bingo ክፈት", web_app: { url: webAppUrl } }]] } }
+        : {}),
     });
   }
 
@@ -165,16 +166,16 @@ export async function registerTelegramWebhook() {
   const token = getBotToken();
   const webhookUrl = getWebhookUrl();
   const webAppUrl = getWebAppUrl();
-  if (!token || !webhookUrl || !webAppUrl) {
+  if (!token || !webhookUrl) {
     logger.warn(
-      {
-        hasBotToken: Boolean(token),
-        hasWebhookUrl: Boolean(webhookUrl),
-        hasWebAppUrl: Boolean(webAppUrl),
-      },
-      "Telegram webhook registration skipped because configuration is incomplete",
+      { hasBotToken: Boolean(token), hasWebhookUrl: Boolean(webhookUrl) },
+      "Telegram webhook registration skipped because required configuration is incomplete",
     );
     return;
+  }
+
+  if (!webAppUrl) {
+    logger.warn("Telegram Mini App URL is not configured; webhook will still be registered");
   }
 
   const secretToken = getWebhookSecret();
@@ -186,12 +187,14 @@ export async function registerTelegramWebhook() {
   });
 
   const optionalSetup = [
-    {
-      method: "setChatMenuButton",
-      body: {
-        menu_button: { type: "web_app", text: "Flash Bingo", web_app: { url: webAppUrl } },
-      },
-    },
+    ...(webAppUrl
+      ? [{
+          method: "setChatMenuButton",
+          body: {
+            menu_button: { type: "web_app", text: "Flash Bingo", web_app: { url: webAppUrl } },
+          },
+        }]
+      : []),
     {
       method: "setMyCommands",
       body: { commands: [{ command: "start", description: "Flash Bingo ክፈት" }] },
@@ -206,7 +209,7 @@ export async function registerTelegramWebhook() {
     }
   }
 
-  logger.info("Telegram webhook registered");
+  logger.info({ hasWebAppUrl: Boolean(webAppUrl) }, "Telegram webhook registered");
 }
 
 export default router;
